@@ -10,10 +10,6 @@ __pycache__/
 *.pyd
 .Python
 
-# Output files (large videos and data)
-output/*.mp4
-output/*.npy
-
 # IDE
 .vscode/
 .idea/
