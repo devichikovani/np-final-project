@@ -26,20 +26,20 @@ R_SAFE = 4.0      # Safety radius for collision avoidance
 DT = 0.05         # Time step for integration
 W, H = 800, 600   # Canvas size
 
-# Animation settings
-TRANSITION_FRAMES = 150   # More frames for drones to reach destination
-HOLD_FRAMES = 40          # Longer pause at completed shape
+# Animation settings (4× frames for 120fps)
+TRANSITION_FRAMES = 600   # 5 seconds at 120fps (was 150 at 30fps)
+HOLD_FRAMES = 160         # 1.3 seconds at 120fps (was 40 at 30fps)
 
 # =============================================================================
 # USER CONFIGURATION - EDIT THESE PATHS TO USE YOUR OWN FILES
 # =============================================================================
 
 # Number of drones (more = better detail, but slower)
-NUM_DRONES = 1200
+NUM_DRONES = 2000  # Increased to fill all empty space
 
 # Input/Output folders
 DATA_FOLDER = "data"      # Folder containing input images/videos
-OUTPUT_FOLDER = "output"  # Folder for output videos
+OUTPUT_FOLDER = "output/120fps"  # Folder for output videos
 
 # Phase 1: Static image of handwritten name (PNG, JPG, or any image)
 # Set to None to use text fallback
@@ -56,8 +56,8 @@ PHASE2_TEXT_FALLBACK = "Happy New Year!"  # Used if image not found
 PHASE3_ANIMATION = "tiger running GIF by Portugal. The Man.gif"  # or .mp4, .avi, .mov
 
 # Animation sampling settings
-MAX_ANIMATION_FRAMES = 25  # Maximum frames to sample from animation
-STEPS_PER_FRAME = 6        # Simulation steps between animation frames
+MAX_ANIMATION_FRAMES = 999  # Use all frames (no sampling limit)
+STEPS_PER_FRAME = 24        # 24 steps per frame for 120fps smooth tracking
 
 
 # =============================================================================
@@ -704,8 +704,8 @@ class Swarm:
         return result
 
 
-def render_video(frames, path, fps=30, label_override=None):
-    """Render frames to MP4 (using cv2 for video I/O only)."""
+def render_video(frames, path, fps=120, label_override=None):
+    """Render frames to MP4 at 120fps (using cv2 for video I/O only)."""
     out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (W, H))
     p1, p2 = len(frames)//3, 2*len(frames)//3
     labels = ["Phase 1: Initial -> Handwritten Name", 
