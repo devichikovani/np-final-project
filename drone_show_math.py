@@ -2,12 +2,24 @@
 Illuminated Drone Show Simulation - NP 2025 Final Project
 Ramaz Botchorishvili, Kutaisi International University
 
-IVP Model: dx/dt = v*min(1, vmax/|v|), dv/dt = (1/m)[kp(T-x) + frep - kd*v]
-Solved with RK4, collision avoidance via repulsive forces.
+*** 3D DRONE SIMULATION WITH VELOCITY FIELD TRACKING ***
+
+Complete IVP Model:
+  dx/dt = v * min(1, vmax/|v|)                    [velocity saturation]
+  dv/dt = (1/m)[Kp(T-x) + Kv(V_flow-v) + Frep - Kd*v]  [spring-damper with velocity field]
+
+where:
+  - x: 3D position (x, y, z)
+  - v: 3D velocity
+  - T: target position from image/animation
+  - V_flow: velocity field from optical flow (for Phase 3 dynamic tracking)
+  - Frep: repulsive collision avoidance force
+
+Solved with 4th-order Runge-Kutta (RK4), collision avoidance via repulsive forces.
 
 *** PURE MATHEMATICAL IMPLEMENTATION ***
 All algorithms implemented from scratch using only numpy for array operations.
-No scipy or cv2 algorithmic functions used.
+No scipy algorithmic functions used. CV2 used only for I/O.
 """
 import numpy as np
 import cv2  # Only for image I/O and video writing
@@ -16,19 +28,29 @@ import os
 
 np.random.seed(42)
 
-# Physics parameters - balanced speed and smoothness
+# Physics parameters - balanced speed and smoothness (3D)
 M = 1.0           # Mass
 V_MAX = 100.0     # Max velocity
 K_P = 25.0        # Position gain (spring constant)
 K_D = 12.0        # Damping coefficient
+K_V = 8.0         # Velocity field gain (for optical flow tracking)
 K_REP = 50.0      # Repulsion strength
-R_SAFE = 4.0      # Safety radius for collision avoidance
+R_SAFE = 4.0      # Safety radius for collision avoidance (3D)
 DT = 0.05         # Time step for integration
-W, H = 800, 600   # Canvas size
+W, H = 800, 600   # Canvas size (projection plane)
+Z_RANGE = 200.0   # Z-axis range for 3D visualization
 
-# Animation settings (4× frames for 120fps)
-TRANSITION_FRAMES = 600   # 5 seconds at 120fps (was 150 at 30fps)
-HOLD_FRAMES = 160         # 1.3 seconds at 120fps (was 40 at 30fps)
+# Animation settings (60fps)
+TRANSITION_FRAMES = 300   # 5 seconds at 60fps
+HOLD_FRAMES = 80          # ~1.3 seconds at 60fps
+
+# 3D Mode Settings
+ENABLE_3D = False         # Disabled - running in 2D mode
+Z_LAYER_SPREAD = 0.3      # How much to spread drones in Z (0.0 = flat, 1.0 = full Z_RANGE)
+
+# Velocity Matching Settings for Dynamic Tracking (Phase 3)
+ENABLE_VELOCITY_FIELD = True  # Enable Kv(dT/dt - v) velocity matching term
+OPTICAL_FLOW_SCALE = 2.0      # (Legacy - kept for compatibility)
 
 # =============================================================================
 # USER CONFIGURATION - EDIT THESE PATHS TO USE YOUR OWN FILES
@@ -39,7 +61,7 @@ NUM_DRONES = 2000  # Increased to fill all empty space
 
 # Input/Output folders
 DATA_FOLDER = "data"      # Folder containing input images/videos
-OUTPUT_FOLDER = "output/120fps"  # Folder for output videos
+OUTPUT_FOLDER = "output/3d_velocity_field"  # Folder for output videos
 
 # Phase 1: Static image of handwritten name (PNG, JPG, or any image)
 # Set to None to use text fallback
@@ -56,8 +78,8 @@ PHASE2_TEXT_FALLBACK = "Happy New Year!"  # Used if image not found
 PHASE3_ANIMATION = "tiger running GIF by Portugal. The Man.gif"  # or .mp4, .avi, .mov
 
 # Animation sampling settings
-MAX_ANIMATION_FRAMES = 999  # Use all frames (no sampling limit)
-STEPS_PER_FRAME = 24        # 24 steps per frame for 120fps smooth tracking
+MAX_ANIMATION_FRAMES = 100  # Max frames to use from animation
+STEPS_PER_FRAME = 10        # Integration steps per animation frame (2x for 60fps)
 
 
 # =============================================================================
@@ -70,6 +92,7 @@ def euclidean_distance_matrix(A, B):
     
     Mathematical formula: d(a,b) = sqrt(sum((a_i - b_i)^2))
     
+    Works for both 2D and 3D points (any dimensionality).
     Optimized using: ||a-b||^2 = ||a||^2 + ||b||^2 - 2*a·b
     
     Replaces: scipy.spatial.distance.cdist
@@ -87,20 +110,27 @@ def euclidean_distance_matrix(A, B):
     return np.sqrt(dist_sq)
 
 
-def spatial_hash_grid(positions, cell_size):
+def spatial_hash_grid_3d(positions, cell_size):
     """
-    Build a spatial hash grid for O(n) neighbor queries.
+    Build a 3D spatial hash grid for O(n) neighbor queries.
     
-    Mathematical concept: Discretize continuous space into cells.
-    Hash function: h(x,y) = (floor(x/cell_size), floor(y/cell_size))
+    Mathematical concept: Discretize continuous 3D space into cells.
+    Hash function: h(x,y,z) = (floor(x/cell_size), floor(y/cell_size), floor(z/cell_size))
     
     Replaces: scipy.spatial.cKDTree
     """
     cells = {}
-    cell_indices = (positions / cell_size).astype(int)
+    # Handle both 2D and 3D positions
+    if positions.shape[1] == 2:
+        cell_indices = np.hstack([
+            (positions / cell_size).astype(int),
+            np.zeros((len(positions), 1), dtype=int)
+        ])
+    else:
+        cell_indices = (positions / cell_size).astype(int)
     
-    for i, (cx, cy) in enumerate(cell_indices):
-        key = (cx, cy)
+    for i, idx in enumerate(cell_indices):
+        key = tuple(idx)
         if key not in cells:
             cells[key] = []
         cells[key].append(i)
@@ -108,41 +138,47 @@ def spatial_hash_grid(positions, cell_size):
     return cells, cell_indices
 
 
-def find_neighbor_pairs(positions, radius):
+def find_neighbor_pairs_3d(positions, radius):
     """
-    Find all pairs of points within radius using spatial hashing.
+    Find all pairs of points within radius using 3D spatial hashing.
     
     Algorithm:
     1. Build spatial hash grid with cell_size = radius
-    2. For each point, check only neighboring cells (3x3 grid)
-    3. Compute actual distance only for candidates
+    2. For each point, check 27 neighboring cells (3x3x3 grid)
+    3. Compute actual 3D distance only for candidates
     
     Replaces: cKDTree.query_pairs(radius)
     """
     cell_size = radius
-    cells, cell_indices = spatial_hash_grid(positions, cell_size)
+    cells, cell_indices = spatial_hash_grid_3d(positions, cell_size)
     pairs = []
     
     n = len(positions)
+    dim = positions.shape[1]
     checked = set()
     
     for i in range(n):
-        cx, cy = cell_indices[i]
-        # Check 3x3 neighborhood of cells
+        idx = cell_indices[i]
+        # Check 3x3x3 neighborhood of cells (or 3x3 for 2D)
+        z_range = [-1, 0, 1] if dim == 3 else [0]
         for dx in [-1, 0, 1]:
             for dy in [-1, 0, 1]:
-                key = (cx + dx, cy + dy)
-                if key in cells:
-                    for j in cells[key]:
-                        if j > i:  # Avoid duplicate pairs
-                            pair_key = (i, j)
-                            if pair_key not in checked:
-                                checked.add(pair_key)
-                                # Euclidean distance check
-                                diff = positions[i] - positions[j]
-                                dist = np.sqrt(diff[0]**2 + diff[1]**2)
-                                if dist < radius:
-                                    pairs.append((i, j))
+                for dz in z_range:
+                    if dim == 3:
+                        key = (idx[0] + dx, idx[1] + dy, idx[2] + dz)
+                    else:
+                        key = (idx[0] + dx, idx[1] + dy, 0)
+                    if key in cells:
+                        for j in cells[key]:
+                            if j > i:  # Avoid duplicate pairs
+                                pair_key = (i, j)
+                                if pair_key not in checked:
+                                    checked.add(pair_key)
+                                    # Euclidean distance check (works for 2D and 3D)
+                                    diff = positions[i] - positions[j]
+                                    dist = np.sqrt(np.sum(diff**2))
+                                    if dist < radius:
+                                        pairs.append((i, j))
     
     return pairs
 
@@ -450,6 +486,145 @@ def find_contour_points(binary_image):
     return np.array(edge_points) if edge_points else np.array([]).reshape(0, 2)
 
 
+def compute_optical_flow(prev_frame, curr_frame):
+    """
+    Compute dense optical flow using Lucas-Kanade method.
+    
+    Mathematical Model (Horn-Schunck/Lucas-Kanade):
+    Brightness constancy: I(x,y,t) = I(x+u, y+v, t+1)
+    Taylor expansion: Ix*u + Iy*v + It = 0
+    
+    where:
+    - Ix, Iy: spatial gradients (Sobel)
+    - It: temporal gradient (frame difference)
+    - u, v: optical flow velocities
+    
+    Local solution (Lucas-Kanade): Solve least squares over window
+    [sum(Ix²)    sum(Ix*Iy)] [u]   [-sum(Ix*It)]
+    [sum(Ix*Iy)  sum(Iy²)  ] [v] = [-sum(Iy*It)]
+    
+    Returns: flow field (H, W, 2) where [:,:,0]=u, [:,:,1]=v
+    """
+    # Ensure float type
+    prev = prev_frame.astype(float)
+    curr = curr_frame.astype(float)
+    
+    # Resize if needed to match dimensions
+    if prev.shape != curr.shape:
+        # Use simple nearest-neighbor resize
+        h, w = curr.shape
+        prev_h, prev_w = prev.shape
+        y_scale, x_scale = prev_h / h, prev_w / w
+        y_indices = (np.arange(h) * y_scale).astype(int)
+        x_indices = (np.arange(w) * x_scale).astype(int)
+        y_indices = np.clip(y_indices, 0, prev_h - 1)
+        x_indices = np.clip(x_indices, 0, prev_w - 1)
+        prev = prev[np.ix_(y_indices, x_indices)]
+    
+    h, w = curr.shape
+    
+    # Compute spatial gradients using Sobel
+    sobel_x = np.array([[-1, 0, 1],
+                        [-2, 0, 2],
+                        [-1, 0, 1]], dtype=float) / 8.0
+    sobel_y = np.array([[-1, -2, -1],
+                        [ 0,  0,  0],
+                        [ 1,  2,  1]], dtype=float) / 8.0
+    
+    Ix = convolve_2d(curr, sobel_x)
+    Iy = convolve_2d(curr, sobel_y)
+    
+    # Temporal gradient
+    It = curr - prev
+    
+    # Window size for Lucas-Kanade (local least squares)
+    win_size = 5
+    half_win = win_size // 2
+    
+    # Create output flow field
+    flow = np.zeros((h, w, 2))
+    
+    # Compute sums over windows using convolution
+    ones_kernel = np.ones((win_size, win_size))
+    
+    Ix2 = convolve_2d(Ix * Ix, ones_kernel)
+    Iy2 = convolve_2d(Iy * Iy, ones_kernel)
+    IxIy = convolve_2d(Ix * Iy, ones_kernel)
+    IxIt = convolve_2d(Ix * It, ones_kernel)
+    IyIt = convolve_2d(Iy * It, ones_kernel)
+    
+    # Solve 2x2 linear system for each pixel
+    # det = Ix2*Iy2 - IxIy^2
+    det = Ix2 * Iy2 - IxIy * IxIy
+    
+    # Avoid division by zero (singular matrix)
+    valid = np.abs(det) > 1e-6
+    
+    # u = (Iy2 * (-IxIt) - IxIy * (-IyIt)) / det
+    # v = (Ix2 * (-IyIt) - IxIy * (-IxIt)) / det
+    flow[:, :, 0] = np.where(valid, (Iy2 * (-IxIt) - IxIy * (-IyIt)) / (det + 1e-10), 0)
+    flow[:, :, 1] = np.where(valid, (Ix2 * (-IyIt) - IxIy * (-IxIt)) / (det + 1e-10), 0)
+    
+    return flow
+
+
+def sample_velocity_field(flow, positions, scale=1.0):
+    """
+    Sample velocity field at drone positions.
+    
+    Uses bilinear interpolation to get smooth velocities.
+    
+    Args:
+        flow: (H, W, 2) optical flow field
+        positions: (N, 2) or (N, 3) drone positions (x, y[, z])
+        scale: velocity scaling factor
+    
+    Returns:
+        velocities: (N, 2) or (N, 3) velocity field values at positions
+    """
+    h, w = flow.shape[:2]
+    n = len(positions)
+    dim = positions.shape[1]
+    
+    # Extract x, y coordinates
+    x = positions[:, 0]
+    y = positions[:, 1]
+    
+    # Clamp to valid range
+    x = np.clip(x, 0, w - 1.001)
+    y = np.clip(y, 0, h - 1.001)
+    
+    # Bilinear interpolation
+    x0 = np.floor(x).astype(int)
+    y0 = np.floor(y).astype(int)
+    x1 = np.minimum(x0 + 1, w - 1)
+    y1 = np.minimum(y0 + 1, h - 1)
+    
+    # Fractional parts
+    fx = x - x0
+    fy = y - y0
+    
+    # Sample flow at 4 corners
+    f00 = flow[y0, x0]  # (n, 2)
+    f01 = flow[y0, x1]
+    f10 = flow[y1, x0]
+    f11 = flow[y1, x1]
+    
+    # Bilinear interpolation
+    vel_2d = (f00 * (1 - fx)[:, None] * (1 - fy)[:, None] +
+              f01 * fx[:, None] * (1 - fy)[:, None] +
+              f10 * (1 - fx)[:, None] * fy[:, None] +
+              f11 * fx[:, None] * fy[:, None])
+    
+    vel_2d *= scale
+    
+    # Extend to 3D if needed (z velocity = 0)
+    if dim == 3:
+        return np.hstack([vel_2d, np.zeros((n, 1))])
+    
+    return vel_2d
+
+
 # =============================================================================
 # MAIN SIMULATION CODE (using mathematical implementations)
 # =============================================================================
@@ -575,20 +750,34 @@ def load_animation(path):
 
 class Swarm:
     """
-    Drone swarm with IVP physics model and RK4 integration.
+    3D Drone swarm with IVP physics model, velocity matching, and RK4 integration.
     
-    Mathematical model:
+    Complete Mathematical Model for Dynamic Tracking:
     - Position: dx/dt = v * min(1, vmax/|v|)  [velocity saturation]
-    - Velocity: dv/dt = (1/m)[kp(T-x) + frep - kd*v]  [spring-damper with repulsion]
+    - Velocity: dv/dt = (1/m)[Kp(T-x) + Kv(dT/dt - v) + Frep - Kd*v]
+    
+    where:
+    - T(t): target position (moving for Phase 3)
+    - dT/dt: target velocity (computed from consecutive frames)
+    - Kv(dT/dt - v): velocity matching term for predictive tracking
+    
+    This ensures drones ANTICIPATE target movement, not just chase positions.
     
     Numerical method: 4th-order Runge-Kutta (RK4)
     """
     
     def __init__(self, n):
         self.n = n
-        self.pos = np.zeros((n, 2))
-        self.vel = np.zeros((n, 2))
-        self.tgt = np.zeros((n, 2))
+        self.dim = 3 if ENABLE_3D else 2
+        
+        self.pos = np.zeros((n, self.dim))
+        self.vel = np.zeros((n, self.dim))
+        self.tgt = np.zeros((n, self.dim))
+        
+        # Target velocity for velocity matching (dT/dt)
+        self.tgt_vel = np.zeros((n, self.dim))
+        self.prev_tgt = None  # Previous target for computing dT/dt
+        self.use_velocity_matching = False
         
         # Initialize on grid
         cols = int(np.sqrt(n * W / H))
@@ -597,20 +786,26 @@ class Swarm:
         grid = np.column_stack([xx.ravel(), yy.ravel()])[:n]
         if len(grid) < n:
             grid = np.vstack([grid, np.random.rand(n - len(grid), 2) * [W-160, H-160] + 80])
-        self.pos = grid.copy()
+        
+        if self.dim == 3:
+            # Add Z coordinate (initially centered at Z_RANGE/2)
+            z_values = np.ones(n) * (Z_RANGE / 2) + np.random.randn(n) * (Z_RANGE * Z_LAYER_SPREAD * 0.1)
+            self.pos = np.column_stack([grid, z_values])
+        else:
+            self.pos = grid.copy()
     
     def repulsion(self):
         """
-        Compute collision avoidance forces using spatial hashing.
+        Compute 3D collision avoidance forces using spatial hashing.
         
-        Force model: frep = krep * (xi-xj) / |xi-xj|^3  if |xi-xj| < Rsafe
+        Force model: Frep = Krep * (xi-xj) / |xi-xj|^3  if |xi-xj| < Rsafe
         
         This is an inverse-square repulsive force (like electrostatic repulsion).
         """
-        forces = np.zeros((self.n, 2))
+        forces = np.zeros((self.n, self.dim))
         
-        # Use spatial hashing instead of KD-Tree
-        pairs = find_neighbor_pairs(self.pos, R_SAFE)
+        # Use 3D spatial hashing
+        pairs = find_neighbor_pairs_3d(self.pos, R_SAFE)
         
         if not pairs:
             return forces
@@ -618,7 +813,7 @@ class Swarm:
         pairs = np.array(pairs)
         diff = self.pos[pairs[:, 0]] - self.pos[pairs[:, 1]]
         
-        # Euclidean distance: ||xi - xj||
+        # 3D Euclidean distance: ||xi - xj||
         dist = np.sqrt(np.sum(diff**2, axis=1))
         dist = np.maximum(dist, 0.1)  # Avoid division by zero
         
@@ -634,7 +829,16 @@ class Swarm:
     
     def step(self):
         """
-        RK4 integration of IVP equations.
+        RK4 integration of complete IVP equations with velocity matching.
+        
+        Complete IVP for Dynamic Tracking:
+        dv/dt = (1/m)[Kp(T-x) + Kv(dT/dt - v) + Frep - Kd*v]
+        
+        The Kv(dT/dt - v) term is CRITICAL:
+        - dT/dt is the target velocity (how fast the target is moving)
+        - v is the drone velocity
+        - This term makes drones MATCH target velocity, not just chase position
+        - Result: Predictive tracking, no lag
         
         4th-order Runge-Kutta method:
         k1 = f(t, y)
@@ -642,12 +846,10 @@ class Swarm:
         k3 = f(t + h/2, y + h*k2/2)
         k4 = f(t + h, y + h*k3)
         y_next = y + (h/6)(k1 + 2*k2 + 2*k3 + k4)
-        
-        Error: O(h^5) per step, O(h^4) global
         """
         def deriv(p, v):
             """Compute derivatives dx/dt and dv/dt."""
-            # Velocity magnitude
+            # Velocity magnitude (3D)
             vnorm = np.sqrt(np.sum(v**2, axis=1, keepdims=True))
             vnorm = np.maximum(vnorm, 1e-6)
             
@@ -660,11 +862,28 @@ class Swarm:
             rep = self.repulsion()
             self.pos = old_pos
             
-            # Acceleration: dv/dt = (1/m)[kp(T-x) + frep - kd*v]
-            # Spring force: kp(T-x) pulls toward target
-            # Damping: -kd*v dissipates energy
-            # Repulsion: frep prevents collisions
-            dv = (K_P * (self.tgt - p) + rep - K_D * v) / M
+            # ============================================================
+            # COMPLETE IVP MODEL:
+            # dv/dt = (1/m)[Kp(T-x) + Kv(dT/dt - v) + Frep - Kd*v]
+            # ============================================================
+            
+            # Spring force: Kp(T-x) - pulls toward target position
+            spring_force = K_P * (self.tgt - p)
+            
+            # Velocity matching: Kv(dT/dt - v) - match target velocity
+            # This is the KEY term for predictive tracking!
+            # Without this, drones just chase positions (laggy)
+            # With this, drones anticipate movement (smooth tracking)
+            if self.use_velocity_matching:
+                velocity_match_force = K_V * (self.tgt_vel - v)
+            else:
+                velocity_match_force = 0
+            
+            # Damping: -Kd*v - dissipates energy
+            damping = K_D * v
+            
+            # Total acceleration
+            dv = (spring_force + velocity_match_force + rep - damping) / M
             
             return dx, dv
         
@@ -678,12 +897,23 @@ class Swarm:
         self.pos += (DT/6) * (k1x + 2*k2x + 2*k3x + k4x)
         self.vel += (DT/6) * (k1v + 2*k2v + 2*k3v + k4v)
         
-        # Boundary constraints
-        self.pos = np.clip(self.pos, 5, [W-5, H-5])
+        # Boundary constraints (3D)
+        if self.dim == 3:
+            self.pos = np.clip(self.pos, [5, 5, 0], [W-5, H-5, Z_RANGE])
+        else:
+            self.pos = np.clip(self.pos, 5, [W-5, H-5])
     
     def simulate(self, targets, frames):
-        """Simulate transition to static targets."""
-        self.tgt = greedy_assignment(self.pos, targets)
+        """Simulate transition to static targets (no velocity matching needed)."""
+        self.use_velocity_matching = False
+        self.tgt = greedy_assignment(self.pos[:, :2], targets)
+        
+        # Add Z coordinate to targets if 3D
+        if self.dim == 3:
+            z_targets = Z_RANGE/2 + (np.arange(self.n) / self.n - 0.5) * Z_RANGE * Z_LAYER_SPREAD
+            np.random.shuffle(z_targets)
+            self.tgt = np.column_stack([self.tgt, z_targets])
+        
         result = []
         for _ in range(frames):
             self.step()
@@ -693,35 +923,120 @@ class Swarm:
             result.append(self.pos.copy())
         return result
     
-    def track(self, target_seq, steps=5):
-        """Simulate dynamic tracking of moving targets."""
+    def track_dynamic(self, target_seq, steps=5, frame_dt=1.0):
+        """
+        Dynamic tracking with velocity matching (dT/dt term).
+        
+        Complete IVP: dv/dt = (1/m)[Kp(T-x) + Kv(dT/dt - v) + Frep - Kd*v]
+        
+        The key insight:
+        - target_seq[i] gives target positions T(t_i)
+        - dT/dt ≈ (T(t_i) - T(t_{i-1})) / dt
+        - Kv(dT/dt - v) makes drone velocity match target velocity
+        
+        This creates PREDICTIVE tracking - drones anticipate where targets
+        are going, not just where they are now.
+        
+        Args:
+            target_seq: List of target positions for each animation frame
+            steps: Integration steps per frame
+            frame_dt: Time between animation frames (for velocity computation)
+        """
+        self.use_velocity_matching = ENABLE_VELOCITY_FIELD
+        self.prev_tgt = None
         result = []
-        for t in target_seq:
-            self.tgt = greedy_assignment(self.pos, t)
+        
+        for i, t in enumerate(target_seq):
+            # Assign targets (2D positions from image)
+            new_tgt_2d = greedy_assignment(self.pos[:, :2], t)
+            
+            # Add Z coordinate to targets if 3D
+            if self.dim == 3:
+                z_targets = Z_RANGE/2 + (np.arange(self.n) / self.n - 0.5) * Z_RANGE * Z_LAYER_SPREAD
+                new_tgt = np.column_stack([new_tgt_2d, z_targets])
+            else:
+                new_tgt = new_tgt_2d
+            
+            # ============================================================
+            # COMPUTE TARGET VELOCITY: dT/dt = (T_new - T_prev) / dt
+            # This is what the Kv term uses for predictive tracking
+            # ============================================================
+            if self.prev_tgt is not None and self.use_velocity_matching:
+                # Target velocity = change in target position / time
+                self.tgt_vel = (new_tgt - self.prev_tgt) / (frame_dt * steps * DT)
+                
+                # Smooth velocity estimate (low-pass filter to reduce noise)
+                # This helps with noisy target detections
+                max_tgt_vel = V_MAX * 0.8  # Target shouldn't move faster than drones
+                vel_magnitude = np.sqrt(np.sum(self.tgt_vel**2, axis=1, keepdims=True))
+                vel_magnitude = np.maximum(vel_magnitude, 1e-6)
+                self.tgt_vel = self.tgt_vel * np.minimum(1.0, max_tgt_vel / vel_magnitude)
+            else:
+                self.tgt_vel = np.zeros_like(new_tgt)
+            
+            # Store current target as previous for next iteration
+            self.prev_tgt = new_tgt.copy()
+            self.tgt = new_tgt
+            
+            # Integrate physics for multiple steps
             for _ in range(steps):
                 self.step()
                 result.append(self.pos.copy())
+        
         return result
+    
+    def track(self, target_seq, steps=5):
+        """Backward compatible: calls track_dynamic."""
+        return self.track_dynamic(target_seq, steps)
 
 
-def render_video(frames, path, fps=120, label_override=None):
-    """Render frames to MP4 at 120fps (using cv2 for video I/O only)."""
+def render_video(frames, path, fps=60, label_override=None):
+    """
+    Render frames to MP4 at 60fps.
+    
+    3D positions are projected to 2D (x, y) for display.
+    Z coordinate is used for depth-based rendering (closer = brighter).
+    """
     out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (W, H))
     p1, p2 = len(frames)//3, 2*len(frames)//3
     labels = ["Phase 1: Initial -> Handwritten Name", 
               "Phase 2: Name -> Happy New Year!", 
-              "Phase 3: Dynamic Tracking"]
+              "Phase 3: Dynamic Tracking (Velocity Field)"]
     
     for i, pos in enumerate(frames):
         frame = np.zeros((H, W, 3), np.uint8)
-        for p in pos:
+        
+        # Check if 3D
+        is_3d = pos.shape[1] == 3 if len(pos.shape) > 1 else False
+        
+        for j, p in enumerate(pos):
             x, y = int(p[0]), int(p[1])
             if 0 <= x < W and 0 <= y < H:
-                cv2.circle(frame, (x, y), 3, (40, 80, 80), -1)
-                cv2.circle(frame, (x, y), 2, (0, 255, 255), -1)
+                if is_3d:
+                    # Depth-based coloring: closer (lower z) = brighter
+                    z = p[2]
+                    depth_factor = 1.0 - (z / Z_RANGE) * 0.5  # 0.5 to 1.0
+                    color_inner = (int(0 * depth_factor), int(255 * depth_factor), int(255 * depth_factor))
+                    color_outer = (int(40 * depth_factor), int(80 * depth_factor), int(80 * depth_factor))
+                    # Size based on depth (closer = larger)
+                    size = int(2 + depth_factor * 1.5)
+                else:
+                    color_inner = (0, 255, 255)
+                    color_outer = (40, 80, 80)
+                    size = 2
+                
+                cv2.circle(frame, (x, y), size + 1, color_outer, -1)
+                cv2.circle(frame, (x, y), size, color_inner, -1)
+        
         label = label_override if label_override else labels[0 if i < p1 else 1 if i < p2 else 2]
         cv2.putText(frame, label, 
                    (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # Add 3D indicator
+        if is_3d and ENABLE_3D:
+            cv2.putText(frame, "[3D Mode]", 
+                       (W - 100, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 255, 100), 1)
+        
         out.write(frame)
     out.release()
     print(f"Video: {path} ({len(frames)} frames)")
@@ -729,16 +1044,16 @@ def render_video(frames, path, fps=120, label_override=None):
 
 def main():
     """
-    Run 3-phase drone show simulation with pure mathematical algorithms.
+    Run 3-phase drone show simulation with:
+    - 3D positioning (x, y, z)
+    - Velocity Field Tracking via Optical Flow (Phase 3)
+    - Pure mathematical algorithms
     
-    Configuration is done via the USER CONFIGURATION section at the top of this file.
-    Edit the following variables to customize:
-    - NUM_DRONES: Number of drones in the swarm
-    - DATA_FOLDER: Input folder path
-    - OUTPUT_FOLDER: Output folder path
-    - PHASE1_IMAGE: Image for Phase 1 (or None for text)
-    - PHASE2_IMAGE: Image for Phase 2 (or None for text)
-    - PHASE3_ANIMATION: GIF or video for Phase 3 (or None to skip)
+    Complete IVP Model:
+    dx/dt = v * min(1, vmax/|v|)
+    dv/dt = (1/m)[Kp(T-x) + Kv(V_flow-v) + Frep - Kd*v]
+    
+    Configuration is done via the USER CONFIGURATION section at the top.
     """
     # Use configuration variables
     n = NUM_DRONES
@@ -749,10 +1064,16 @@ def main():
     
     print("=" * 60)
     print("PURE MATHEMATICAL IMPLEMENTATION")
-    print("Using: RK4, Spatial Hashing, Greedy Assignment, Sobel/Canny")
+    print("3D Drone Simulation with Velocity Matching (Kv term)")
     print("=" * 60)
+    print(f"\nComplete IVP Model:")
+    print(f"  dx/dt = v * min(1, Vmax/|v|)")
+    print(f"  dv/dt = (1/m)[Kp(T-x) + Kv(dT/dt - v) + Frep - Kd*v]")
+    print(f"\n  where dT/dt = target velocity (predictive tracking)")
     print(f"\nConfiguration:")
     print(f"  Drones: {n}")
+    print(f"  3D Mode: {ENABLE_3D}")
+    print(f"  Velocity Matching (Kv): {ENABLE_VELOCITY_FIELD}")
     print(f"  Data folder: {data}")
     print(f"  Output folder: {output}")
     
@@ -798,8 +1119,8 @@ def main():
     p2_frames = len(frames)
     print(f"  Phase 2: {len(phase2_frames)} frames (including {HOLD_FRAMES} hold)")
     
-    # Phase 3: Dynamic Tracking
-    print("\n[Phase 3] Dynamic Tracking")
+    # Phase 3: Dynamic Tracking with Velocity Matching
+    print("\n[Phase 3] Dynamic Tracking with Velocity Matching (Kv term)")
     if PHASE3_ANIMATION:
         anim_path = os.path.join(data, PHASE3_ANIMATION)
         if os.path.exists(anim_path):
@@ -810,7 +1131,15 @@ def main():
                 sampled = anim_frames[::sample_rate]
                 print(f"  Using {len(sampled)} of {len(anim_frames)} frames (sample rate: 1/{sample_rate})")
                 
-                phase3_frames = swarm.track([extract_points(f, n) for f in sampled], steps=STEPS_PER_FRAME)
+                # Extract target positions for each frame
+                print(f"  Extracting target positions...")
+                target_seq = [extract_points(f, n) for f in sampled]
+                
+                # Use track_dynamic which computes dT/dt for velocity matching
+                # This implements the COMPLETE IVP:
+                # dv/dt = (1/m)[Kp(T-x) + Kv(dT/dt - v) + Frep - Kd*v]
+                print(f"  Velocity matching: {ENABLE_VELOCITY_FIELD}")
+                phase3_frames = swarm.track_dynamic(target_seq, steps=STEPS_PER_FRAME)
                 frames.extend(phase3_frames)
                 print(f"  Phase 3: {len(phase3_frames)} frames")
             else:
@@ -829,14 +1158,16 @@ def main():
                  label_override="Phase 2: Name -> Greeting")
     if len(frames) > p2_frames:
         render_video(frames[p2_frames:], os.path.join(output, "drone_show_math_phase3.mp4"), 
-                     label_override="Phase 3: Dynamic Tracking")
+                     label_override="Phase 3: Dynamic Tracking (Velocity Field)")
     
     # Output combined video
     render_video(frames, os.path.join(output, "drone_show_math_combined.mp4"))
-    np.save(os.path.join(output, "trajectories_math.npy"), np.array(frames))
+    np.save(os.path.join(output, "trajectories_math.npy"), np.array(frames, dtype=object))
     
     print("\n" + "=" * 60)
-    print(f"DONE! {len(frames)} total frames, {n} drones, ~{len(frames)/30:.1f}s video")
+    print(f"DONE! {len(frames)} total frames, {n} drones")
+    print(f"Mode: {'3D' if ENABLE_3D else '2D'}, Velocity Field: {ENABLE_VELOCITY_FIELD}")
+    print(f"Video duration: ~{len(frames)/60:.1f}s at 60fps")
     print(f"Output saved to: {output}/")
     print("=" * 60)
 

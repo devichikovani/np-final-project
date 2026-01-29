@@ -1,375 +1,280 @@
-# Subtask 2: Handwritten Name → Greeting Message
+# Subtask 2: Handwritten Name → Greeting
 
-## Complete Theoretical and Implementation Explanation
+## Mathematical Analysis of Static-to-Static Transition
 
 ---
 
 # 1. OVERVIEW
 
-## What This Subtask Does
+**Goal:** Transition drones from the handwritten name formation to display a greeting message.
 
-**Objective:** Transform the drone swarm from your handwritten name (from Subtask 1) into a greeting message like "Happy New Year!".
-
-**Visual Sequence:**
+**IVP Model (Static Target):**
 ```
-Frame 0 (from Sub1):        Frame 75:                   Frame 150:
-┌─────────────────┐        ┌─────────────────┐        ┌─────────────────┐
-│ ·····     ····  │        │    ·  ·    ··   │        │ ·  · ····  ···  │
-│ ·   ·    ·   ·  │   →    │  ·   ·  · ·     │   →    │ ·  · ·  ·  ·  · │
-│ ·····    ·····  │        │ ·· ·   ·   · ·  │        │ ···· ····  ···  │
-│ ·  ·     ·   ·  │        │  ·  ·  · ·  ·   │        │ ·  · ·     ·    │
-│ ·   ·    ·   ·  │        │   · ·    ·  · · │        │ ·  · ·     ·    │
-└─────────────────┘        └─────────────────┘        └─────────────────┘
-  "RAMAZ" (End Sub1)         Mid-Transition            "HNY" Complete
+dx/dt = v * min(1, Vmax/|v|)
+dv/dt = (1/m)[Kp(T_new - x) + Frep - Kd*v]
+
+Initial conditions:
+x(0) = name_formation_position
+v(0) = current_velocity  (may be near-zero after holding)
 ```
 
 ---
 
-# 2. KEY DIFFERENCE FROM SUBTASK 1
+# 2. INITIAL STATE: HANDWRITTEN NAME
 
-## Starting Configuration
+## 2.1 Starting Positions
+
+After Subtask 1 + hold period:
+```
+x(0) ≈ T_name  (settled at name formation)
+v(0) ≈ 0       (velocities damped out)
+```
+
+## 2.2 Why v(0) ≈ 0?
+
+The hold period (HOLD_FRAMES = 80) gives drones time to settle:
+```
+Hold duration = 80 frames / 60 fps ≈ 1.33 seconds
+```
+
+With settling time τ ≈ 0.37s, the system reaches equilibrium.
+
+---
+
+# 3. TARGET EXTRACTION: GREETING MESSAGE
+
+## 3.1 Text Rendering
+
+```python
+def render_text_to_image(text, width, height):
+    """Render greeting text to binary image."""
+    img = Image.new('L', (width, height), 0)
+    draw = ImageDraw.Draw(img)
+    
+    # Calculate font size to fit
+    font_size = estimate_font_size(text, width, height)
+    font = ImageFont.truetype(FONT_PATH, font_size)
+    
+    # Center text
+    bbox = draw.textbbox((0, 0), text, font=font)
+    x = (width - (bbox[2] - bbox[0])) // 2
+    y = (height - (bbox[3] - bbox[1])) // 2
+    
+    draw.text((x, y), text, fill=255, font=font)
+    return np.array(img)
+```
+
+## 3.2 Edge Detection
+
+Same pipeline as Subtask 1:
+```
+Text Image → Grayscale → Canny → Point Sampling
+```
+
+---
+
+# 4. REASSIGNMENT PROBLEM
+
+## 4.1 The Challenge
+
+Drones are already at name formation. Need to reassign to greeting targets.
+
+**Constraint:** Minimize total travel distance.
+
+## 4.2 Distance Matrix
+
+```
+D[i,j] = ||current_position[i] - greeting_target[j]||
+```
+
+## 4.3 Greedy Solution
+
+```python
+def reassign_targets(current_positions, new_targets):
+    """Reassign drones to new targets minimizing distance."""
+    dist = euclidean_distance_matrix(current_positions, new_targets)
+    
+    assignment = np.zeros((len(current_positions), 2))
+    assigned = np.zeros(len(new_targets), dtype=bool)
+    
+    for i in range(len(current_positions)):
+        masked_dist = dist[i].copy()
+        masked_dist[assigned] = np.inf
+        j = np.argmin(masked_dist)
+        assignment[i] = new_targets[j]
+        assigned[j] = True
+    
+    return assignment
+```
+
+---
+
+# 5. THE IVP MODEL (IDENTICAL TO SUBTASK 1)
+
+## 5.1 State Equations
+
+```
+dx/dt = v * min(1, Vmax/|v|)
+dv/dt = (1/m)[Kp(T_greeting - x) + Frep - Kd*v]
+```
+
+## 5.2 Force Components
+
+| Force | Formula | Purpose |
+|-------|---------|---------|
+| Spring | Kp(T-x) | Pull toward greeting target |
+| Repulsion | Σ Krep(xi-xj)/d³ | Collision avoidance |
+| Damping | -Kd*v | Energy dissipation |
+
+---
+
+# 6. TRANSITION DYNAMICS
+
+## 6.1 Phase Portrait
+
+The system evolves through:
+
+1. **Acceleration Phase:** Drones accelerate toward new targets
+2. **Cruise Phase:** Drones at Vmax (if distance is large)
+3. **Deceleration Phase:** Drones slow down approaching targets
+4. **Settling Phase:** Final convergence
+
+## 6.2 Velocity Profile
+
+For a drone traveling distance d:
+```
+Peak velocity: min(Vmax, √(2*Kp*d/m))
+```
+
+With Kp = 25, m = 1, Vmax = 100:
+```
+Saturation occurs when d > Vmax²/(2*Kp) = 10000/50 = 200 pixels
+```
+
+---
+
+# 7. COLLISION HANDLING
+
+## 7.1 Spatial Hashing
+
+Grid-based acceleration for O(n) complexity:
+```python
+cell_size = 2 * R_SAFE  # 8 pixels
+grid = spatial_hash_grid(positions, cell_size)
+```
+
+## 7.2 Repulsion Calculation
+
+```python
+def repulsion(self):
+    """Compute collision avoidance forces."""
+    forces = np.zeros_like(self.pos)
+    grid, cell_idx = spatial_hash_grid(self.pos, 2*R_SAFE)
+    
+    for i in range(len(self.pos)):
+        for neighbor in get_neighbors(grid, cell_idx[i]):
+            if neighbor != i:
+                diff = self.pos[i] - self.pos[neighbor]
+                dist = np.linalg.norm(diff)
+                
+                if dist < R_SAFE and dist > 0:
+                    forces[i] += K_REP * diff / (dist**3)
+    
+    return forces
+```
+
+---
+
+# 8. PATH COMPLEXITY
+
+## 8.1 Crossing Paths
+
+When transitioning from name to greeting:
+- Some drones move left
+- Some drones move right
+- Paths may cross
+
+## 8.2 Repulsion Resolution
+
+The repulsion force naturally resolves conflicts:
+```
+F_rep = Krep × (xi - xj) / |xi - xj|³
+```
+
+This scales as 1/d², creating strong separation at close range.
+
+---
+
+# 9. CONVERGENCE ANALYSIS
+
+## 9.1 Lyapunov Function
+
+Total energy of the system:
+```
+V = Σᵢ [½m|vᵢ|² + ½Kp|Tᵢ-xᵢ|²]
+```
+
+**Time derivative:**
+```
+dV/dt = Σᵢ [m*vᵢ·v̇ᵢ + Kp(Tᵢ-xᵢ)·(-vᵢ)]
+      = Σᵢ [vᵢ·(Kp(Tᵢ-xᵢ) + Frep - Kd*vᵢ) - Kp*vᵢ·(Tᵢ-xᵢ)]
+      = Σᵢ [vᵢ·Frep - Kd|vᵢ|²]
+```
+
+For well-separated drones (Frep ≈ 0):
+```
+dV/dt = -Kd Σᵢ|vᵢ|² ≤ 0
+```
+
+**Energy decreases monotonically → System converges.**
+
+---
+
+# 10. FRAME TIMING
+
+| Parameter | Value | Meaning |
+|-----------|-------|---------|
+| TRANSITION_FRAMES | 300 | Frames for name→greeting |
+| HOLD_FRAMES | 80 | Frames to hold greeting |
+| STEPS_PER_FRAME | 10 | Physics steps per frame |
+| DT | 0.05 | Time step |
+
+**Simulation time per transition:**
+```
+300 frames × 10 steps × 0.05s = 150 seconds (sim time)
+```
+
+**Video duration:**
+```
+300 frames / 60 fps = 5 seconds
+```
+
+---
+
+# 11. COMPARISON: SUBTASK 1 vs SUBTASK 2
 
 | Aspect | Subtask 1 | Subtask 2 |
 |--------|-----------|-----------|
-| **Initial State** | Uniform grid | Handwritten name shape |
-| **Initial Velocity** | Zero (at rest) | Non-zero (from previous motion) |
-| **Target** | Handwritten name | Greeting text |
-
-**Critical Point:** In Subtask 2, drones are NOT starting from rest. They retain their velocities from the end of Subtask 1.
-
-## Mathematical Implication
-
-The IVP for Subtask 2 has different initial conditions:
-
-$$\vec{x}_i(0) = \text{final position from Subtask 1}$$
-$$\vec{v}_i(0) = \text{final velocity from Subtask 1} \approx \vec{0}$$
-
-Since Subtask 1 includes a "hold" phase, velocities should be near zero, but the **positions** are now the name shape, not a grid.
-
----
-
-# 3. MATHEMATICAL PROBLEM FORMULATION
-
-## 3.1 State at Start of Subtask 2
-
-After Subtask 1 completes:
-- Drones are positioned on the handwritten name outline
-- Drones have (nearly) zero velocity (settled)
-- The swarm object retains its state
-
-## 3.2 New Target Configuration
-
-A new set of target points is extracted from the greeting image:
-
-$$\vec{T}'_i = \text{points on "Happy New Year!" outline}$$
-
-## 3.3 Re-Assignment Problem
-
-The drone-to-target assignment must be recalculated because:
-1. Drone positions have changed (now on name shape)
-2. Target positions are different (greeting shape)
-3. Optimal paths from new positions ≠ old paths
-
-```
-Before (Subtask 1):          After (Subtask 2):
-Grid → Name                  Name → Greeting
-
-  ···        ·····          ·····     Happy
-  ···   →    ·   ·          ·   ·  →  New
-  ···        ·····          ·····     Year!
-```
-
----
-
-# 4. THE PHYSICS ARE IDENTICAL
-
-## Same IVP, Same Solver
-
-The differential equations are **exactly the same** as Subtask 1:
-
-**Position:**
-$$\frac{d\vec{x}_i}{dt} = \vec{v}_i \cdot \min\left(1, \frac{v_{max}}{|\vec{v}_i|}\right)$$
-
-**Velocity:**
-$$\frac{d\vec{v}_i}{dt} = \frac{1}{m}\left[k_p(\vec{T}'_i - \vec{x}_i) + \vec{F}_{rep,i} - k_d\vec{v}_i\right]$$
-
-The only difference is:
-- $\vec{T}'_i$ is the **new** target (greeting, not name)
-- Initial positions are the **name shape**, not grid
-
-## Why This Works
-
-The spring-mass-damper model doesn't care WHERE the target is. It just:
-1. Computes force toward target
-2. Applies damping
-3. Avoids collisions
-
-Same code, different inputs.
-
----
-
-# 5. CODE IMPLEMENTATION
-
-## 5.1 Phase 2 Execution in main()
-
-**Location:** `main()` function (lines 763-781)
-
-```python
-# Phase 2: Name -> Greeting
-print("\n[Phase 2] Greeting")
-if PHASE2_IMAGE:
-    gr = os.path.join(data, PHASE2_IMAGE)
-    if os.path.exists(gr):
-        print(f"  Loading image: {gr}")
-        t2 = extract_points(gr, n)
-    else:
-        print(f"  Image not found: {gr}")
-        print(f"  Using text fallback: '{PHASE2_TEXT_FALLBACK}'")
-        t2 = extract_points(PHASE2_TEXT_FALLBACK, n, True)
-else:
-    print(f"  Using text: '{PHASE2_TEXT_FALLBACK}'")
-    t2 = extract_points(PHASE2_TEXT_FALLBACK, n, True)
-
-phase2_frames = swarm.simulate(t2, TRANSITION_FRAMES)
-frames.extend(phase2_frames)
-```
-
-## 5.2 Swarm State Persistence
-
-**Critical:** The `swarm` object is **not reset** between Subtask 1 and 2.
-
-```python
-swarm = Swarm(n)                      # Created once
-phase1_frames = swarm.simulate(t1, ...)  # Subtask 1 - modifies swarm.pos
-phase2_frames = swarm.simulate(t2, ...)  # Subtask 2 - starts from swarm.pos
-```
-
-After Subtask 1:
-- `swarm.pos` = positions on handwritten name
-- `swarm.vel` ≈ zero (settled during hold phase)
-- `swarm.tgt` = old targets (will be overwritten)
-
-Subtask 2 calls `simulate(t2, ...)`:
-1. Computes new assignment: `swarm.tgt = greedy_assignment(swarm.pos, t2)`
-2. Runs simulation from current positions
-3. Drones fly from name → greeting
-
----
-
-## 5.3 Target Extraction for Greeting
-
-Same function as Subtask 1, but different input:
-
-```python
-# Text rendering for greeting
-t2 = extract_points("Happy New Year!", n, is_text=True)
-```
-
-When `is_text=True`:
-
-```python
-def extract_points(source, n, is_text=False):
-    if is_text:
-        img = np.zeros((H, W), np.uint8)  # Black canvas
-        font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 2.5, 5
-        
-        # Auto-scale to fit
-        (tw, th), _ = cv2.getTextSize(source, font, scale, thick)
-        if tw > W - 100: 
-            scale *= (W - 100) / tw
-        
-        # Center text
-        cv2.putText(img, source, ((W-tw)//2, (H+th)//2), font, scale, 255, thick)
-        
-        # Get white pixels as points
-        pts = np.column_stack(np.where(img > 0))
-```
-
-**Result:** Points forming the rendered text "Happy New Year!"
-
----
-
-# 6. REASSIGNMENT ANALYSIS
-
-## 6.1 Why Reassignment Matters
-
-The greedy assignment for Subtask 2 produces **different paths** than Subtask 1 because starting positions are different.
-
-**Example:**
-
-```
-Subtask 1 (Grid → Name):     Subtask 2 (Name → Greeting):
-Drone at (100, 200)          Drone at (400, 300)
-  → Target (350, 250)          → Target (200, 150)
-  Path: right + down           Path: left + up
-```
-
-## 6.2 Path Crossing Potential
-
-When drones transition between very different shapes, paths may cross:
-
-```
-Name Shape:        Greeting Shape:      Paths:
-    A                  H                  ╲╱
-   ╱ ╲                ═╪═                  ╳
-  ╱   ╲              │ │                  ╱╲
-```
-
-**Collision Avoidance Handles This:**
-- When paths cross, drones get close to each other
-- Repulsion forces push them apart
-- They route around each other naturally
-
----
-
-# 7. COLLISION DYNAMICS IN SUBTASK 2
-
-## 7.1 Higher Collision Likelihood
-
-In Subtask 1, drones start spread out on a grid → paths tend to be parallel.
-
-In Subtask 2, drones start clustered on letter shapes → paths may converge/diverge dramatically.
-
-**Example: "A" to "H" transition**
-- Drones on left leg of "A" might go to left bar of "H"
-- Drones on right leg of "A" might go to right bar of "H"
-- Their paths cross in the middle
-
-## 7.2 Repulsion Response
-
-When drones approach within R_SAFE = 4 pixels:
-
-$$\vec{F}_{rep} = \sum_{j: |\vec{x}_i - \vec{x}_j| < R_{safe}} k_{rep} \cdot \frac{\vec{x}_i - \vec{x}_j}{|\vec{x}_i - \vec{x}_j|^3}$$
-
-**What happens:**
-1. Drones slow down (damping)
-2. Repulsion pushes them sideways
-3. They curve around each other
-4. Continue toward targets after clearing
-
-**Video Effect:** Drones appear to "flow around" each other rather than collide.
-
----
-
-# 8. CONVERGENCE ANALYSIS FOR SUBTASK 2
-
-## 8.1 Is Convergence Different?
-
-The mathematical analysis is **identical** to Subtask 1:
-
-- Same damping ratio: $\zeta = 1.2$ (overdamped)
-- Same time constant: $\tau \approx 0.37s$
-- Same settling time: ~55 frames for 99%
-
-## 8.2 Potential Difference: Distance to Target
-
-If the greeting shape is very different from the name shape, average distance to target may be larger:
-
-| Transition | Typical Distance | Frames Needed |
-|------------|------------------|---------------|
-| Grid → Name | ~200 pixels | ~50 frames |
-| Name → Greeting | ~250 pixels | ~60 frames |
-| Name → Very Different | ~400 pixels | ~80 frames |
-
-With `TRANSITION_FRAMES = 150`, all cases have sufficient time.
-
----
-
-# 9. CONFIGURATION OPTIONS FOR SUBTASK 2
-
-## 9.1 Image vs Text
-
-**Using image file:**
-```python
-PHASE2_IMAGE = "greeting.png"  # Your custom image
-```
-
-**Using rendered text:**
-```python
-PHASE2_IMAGE = None  # Will use text fallback
-PHASE2_TEXT_FALLBACK = "Happy New Year!"
-```
-
-## 9.2 Custom Greeting
-
-Edit in the configuration section:
-
-```python
-PHASE2_TEXT_FALLBACK = "HELLO 2025"  # Any text you want
-```
-
-The text will be auto-scaled to fit the canvas.
-
----
-
-# 10. VIDEO OUTPUT FOR SUBTASK 2
-
-## 10.1 Frame Count
-
-| Phase | Frames | Duration at 30fps |
-|-------|--------|-------------------|
-| Transition | 150 | 5.0 seconds |
-| Hold | 40 | 1.3 seconds |
-| **Total** | **190** | **6.3 seconds** |
-
-## 10.2 Timeline
-
-| Frame Range | Description |
-|-------------|-------------|
-| 0-10 | Drones begin moving from name shape |
-| 10-40 | Acceleration phase, letters dissolving |
-| 40-90 | Peak velocity, crossing paths |
-| 90-120 | Deceleration, greeting forming |
-| 120-150 | Settling into final positions |
-| 150-190 | Hold - greeting clearly visible |
-
-## 10.3 Output Files
-
-```
-output/drone_show_math_phase2.mp4   - Only Subtask 2
-output/drone_show_math_combined.mp4 - Full video (includes this)
-```
-
----
-
-# 11. COMPARISON: SUBTASK 1 VS SUBTASK 2
-
-| Aspect | Subtask 1 | Subtask 2 |
-|--------|-----------|-----------|
-| **Start Shape** | Uniform grid | Handwritten name |
-| **End Shape** | Handwritten name | Greeting text |
-| **Initial Velocity** | Zero | Near-zero |
-| **Path Complexity** | Low (parallel paths) | Medium (crossing possible) |
-| **Collision Events** | Few | More |
-| **Physics Model** | Same | Same |
-| **Solver** | RK4 | RK4 |
-| **Duration** | 6.3 seconds | 6.3 seconds |
+| Initial State | Grid (uniform) | Name formation |
+| Initial Velocity | 0 | ≈ 0 (after hold) |
+| Target | Handwritten name | Greeting text |
+| IVP Model | Same | Same |
+| Path Complexity | Low (parallel) | Medium (crossing) |
 
 ---
 
 # 12. SUMMARY
 
-## Subtask 2 Pipeline:
+**Subtask 2 solves the same static-target IVP as Subtask 1:**
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  Name Positions │ ──→ │ Extract Greeting │ ──→ │ Greedy Assign   │
-│  (From Sub1)    │     │ (Text/Image)     │     │ (New Pairing)   │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
-                                                         │
-         ┌───────────────────────────────────────────────┘
-         ↓
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  RK4 Simulation │ ──→ │  Record Frames   │ ──→ │  Render Video   │
-│  (Same physics) │     │  (positions)     │     │  (MP4 output)   │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
+dx/dt = v * min(1, Vmax/|v|)
+dv/dt = (1/m)[Kp(T - x) + Frep - Kd*v]
 ```
 
-## Key Insight:
+**Key differences from Subtask 1:**
+- Non-zero initial state (coming from name formation)
+- More complex path crossings (resolved by repulsion)
+- Same convergence properties
 
-**Subtask 2 is mathematically identical to Subtask 1** — it's just a different transition:
-- Different starting positions (name, not grid)
-- Different target positions (greeting, not name)
-- Same physics, same solver, same parameters
-
-The only "new" challenge is handling more path crossings, which the repulsion forces naturally resolve.
+**No velocity matching needed** — targets are static.
