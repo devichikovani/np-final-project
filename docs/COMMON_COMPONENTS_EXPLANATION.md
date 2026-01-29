@@ -16,11 +16,8 @@ This document covers all code components that are **shared across all three subt
 | Repulsion Forces | All subtasks | Collision avoidance |
 | Spatial Hashing | All subtasks | O(n) neighbor detection |
 | Distance Matrix | All subtasks | Euclidean distance computation |
-| Greedy Assignment | All subtasks | Drone-to-target pairing |
-| Edge Detection (Canny) | All subtasks | Target point extraction |
-| Gaussian Blur | Image processing | Noise reduction |
-| Sobel Gradients | Image processing | Edge detection |
-| Otsu Thresholding | Image processing | Binary segmentation |
+| Assignment (Hungarian) | All subtasks | Optimal drone-to-target pairing (SciPy) |
+| Image Processing (OpenCV) | All subtasks | Target extraction, edge detection, thresholding |
 | Video Rendering | Output generation | MP4 creation |
 
 ---
@@ -102,14 +99,10 @@ Makes drone velocity match target velocity for predictive tracking.
 
 **Velocity matching force:**
 ```
-F_velocity = Kv * (dT/dt - v)
+F_velocity = Kv * (V(x,t) - v)
 ```
 
-| Value | Effect |
-|-------|--------|
-| Kv = 0 | No velocity matching (laggy tracking) |
-| Kv = 8 | Balanced (default) |
-| Kv = 16 | Strong matching (may overshoot) |
+Where V(x,t) is the velocity field from optical flow (OpenCV Farneback).
 
 ### Repulsion Strength (K_REP = 50.0)
 
@@ -246,42 +239,13 @@ def spatial_hash_grid(positions, cell_size):
 
 ---
 
-# 6. GREEDY ASSIGNMENT
+## 6. ASSIGNMENT (HUNGARIAN ALGORITHM)
 
-## 6.1 Problem
+Optimal assignment is now performed using SciPy's Hungarian algorithm (linear_sum_assignment), which guarantees global minimum total distance and optimal drone-to-target pairing.
 
-Match n drones to n targets to minimize total distance.
-
-## 6.2 Algorithm
-
-```python
-def greedy_assignment(positions, targets):
-    """For each drone, find nearest unassigned target."""
-    n = len(positions)
-    dist = euclidean_distance_matrix(positions, targets)
-    
-    result = np.zeros((n, 2))
-    assigned = np.zeros(n, dtype=bool)
-    
-    for i in range(n):
-        masked_dist = dist[i].copy()
-        masked_dist[assigned] = np.inf
-        j = np.argmin(masked_dist)
-        result[i] = targets[j]
-        assigned[j] = True
-    
-    return result
-```
-
-## 6.3 Complexity
-
-- Distance Matrix: O(n²)
-- Assignment Loop: O(n²)
-- Total: O(n²)
-
----
-
-# 7. EUCLIDEAN DISTANCE MATRIX
+**Why:**
+- Required by assignment for optimality
+- More robust than greedy assignment
 
 ## 7.1 Formula
 
@@ -305,55 +269,15 @@ def euclidean_distance_matrix(A, B):
 
 ---
 
-# 8. IMAGE PROCESSING
 
-## 8.1 Canny Edge Detection
+# 7. IMAGE PROCESSING (OPENCV)
 
-**Steps:**
-1. Gaussian blur (noise reduction)
-2. Sobel gradients (edge detection)
-3. Non-maximum suppression (edge thinning)
-4. Hysteresis thresholding (edge connection)
+All image processing (Gaussian blur, Canny edge detection, Otsu threshold, contour finding, background subtraction) is now performed using OpenCV library functions for speed and robustness.
 
-```python
-def canny_edge_detection(image, low_thresh=50, high_thresh=150):
-    blurred = gaussian_blur(image, kernel_size=5, sigma=1.4)
-    magnitude, direction = sobel_gradients(blurred)
-    magnitude = (magnitude / magnitude.max() * 255).astype(np.uint8)
-    thin_edges = non_maximum_suppression(magnitude, direction)
-    edges = hysteresis_threshold(thin_edges, low_thresh, high_thresh)
-    return edges
-```
-
-## 8.2 Sobel Operators
-
-**Kernels:**
-```
-Gx = [[-1, 0, 1],      Gy = [[-1, -2, -1],
-      [-2, 0, 2],            [ 0,  0,  0],
-      [-1, 0, 1]]            [ 1,  2,  1]]
-```
-
-**Gradient:**
-```
-magnitude = sqrt(Gx² + Gy²)
-direction = atan2(Gy, Gx)
-```
-
-## 8.3 Gaussian Blur
-
-**2D Gaussian kernel:**
-```
-G(x,y) = (1/(2π*σ²)) * exp(-(x² + y²)/(2*σ²))
-```
-
-## 8.4 Otsu's Thresholding
-
-Automatically find optimal threshold by maximizing between-class variance:
-
-```
-σ_b²(t) = w0(t) * w1(t) * (μ0(t) - μ1(t))²
-```
+**Why:**
+- Assignment allows/encourages use of OpenCV for these tasks
+- Pure-math implementations were slow and are not required
+- Focus is on physics and numerical methods, not reimplementing standard image processing
 
 ---
 
@@ -383,7 +307,8 @@ def render_video(frames, path, fps=60, label_override=None):
 
 ---
 
-# 10. SUMMARY: IVP EQUATIONS
+
+# 8. SUMMARY: IVP EQUATIONS
 
 ## Static Targets (Subtasks 1 & 2):
 ```

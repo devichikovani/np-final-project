@@ -81,77 +81,32 @@ Discretizes continuous 2D space into grid cells for O(n) neighbor lookup instead
 
 ---
 
-### 6. Greedy Assignment Algorithm
-**Location:** `greedy_assignment()` function
+
+### 6. Assignment Algorithm
+**Location:** `hungarian_assignment()` function (SciPy)
 
 **Algorithm:**
 ```
-For each drone i:
-    Find nearest unassigned target j
-    Assign drone i → target j
-    Mark target j as assigned
+Optimal assignment using Hungarian algorithm (Kuhn-Munkres, O(n³))
+Minimizes total distance: min Σ ||position[i] - target[π(i)]||
 ```
 
-**Why kept as math:** Shows assignment algorithm understanding. Not globally optimal like Hungarian, but O(n²) vs O(n³).
+**Why used:** Required by assignment for global optimality. Replaces all pure-math assignment code.
 
 ---
 
-## SWITCHED TO LIBRARY (Image I/O - Not Core Math)
 
-These were switched from pure Python to OpenCV for **performance reasons only**:
+## IMAGE PROCESSING & ASSIGNMENT: NOW LIBRARY-BASED
 
-### 1. Gaussian Blur → `cv2.GaussianBlur`
+All image processing (Gaussian blur, Canny edge detection, Otsu threshold, contour finding) and assignment are now handled by robust library functions:
 
-**Original Math Implementation:**
-```python
-def gaussian_kernel_2d(size, sigma):
-    G(x,y) = (1/(2πσ²)) · exp(-(x² + y²)/(2σ²))
-    
-def convolve_2d(image, kernel):
-    (f * g)(x,y) = Σᵢ Σⱼ f(i,j) · g(x-i, y-j)
-```
+- **OpenCV**: Used for all image preprocessing (Gaussian blur, Canny, thresholding, contour extraction, background subtraction)
+- **SciPy**: Used for optimal assignment (Hungarian algorithm)
 
-**Why switched:** 
-- Pure Python nested loops are ~1000x slower than C++ OpenCV
-- Processing 41 GIF frames took 10+ minutes vs 2 seconds
-- This is IMAGE I/O, not the core numerical method
-
----
-
-### 2. Canny Edge Detection → `cv2.Canny`
-
-**Original Math Implementation:**
-```python
-def canny_edge_detection():
-    1. Gaussian blur (noise reduction)
-    2. Sobel gradients: Gₓ, Gᵧ, magnitude = √(Gₓ² + Gᵧ²)
-    3. Non-maximum suppression (edge thinning)
-    4. Hysteresis thresholding (edge connection)
-```
-
-**Why switched:**
-- `non_maximum_suppression()` requires pixel-by-pixel iteration
-- Pure Python: ~30 seconds per image
-- OpenCV: ~1 millisecond per image
-- This is preprocessing, not the physics simulation
-
----
-
-### 3. Otsu Threshold → `cv2.threshold(..., THRESH_OTSU)`
-
-**Original Math Implementation:**
-```python
-def otsu_threshold():
-    # Maximize between-class variance
-    σ²ᵦ(t) = w₀(t) · w₁(t) · (μ₀(t) - μ₁(t))²
-    
-    For t in 0..255:
-        Calculate class probabilities w₀, w₁
-        Calculate class means μ₀, μ₁
-        Find t that maximizes σ²ᵦ
-```
-
-**Why switched:** Same performance reason - image preprocessing, not core algorithm.
+**Why:**
+- Assignment requirements allow/encourage use of robust libraries for these tasks
+- Pure-math implementations were slow, less robust, and are not required by the assignment
+- Focus is on physics simulation and numerical methods, not reimplementing standard image processing
 
 ---
 
@@ -164,10 +119,10 @@ def otsu_threshold():
 | **Repulsive Forces** | ✅ Pure Math | Physics model |
 | **Distance Matrix** | ✅ Pure Math | Simple, demonstrates math understanding |
 | **Spatial Hashing** | ✅ Pure Math | Demonstrates data structure knowledge |
-| **Greedy Assignment** | ✅ Pure Math | Demonstrates algorithm understanding |
-| **Gaussian Blur** | ⚡ OpenCV | 1000x faster, just image preprocessing |
-| **Canny Edges** | ⚡ OpenCV | 30000x faster, just image preprocessing |
-| **Otsu Threshold** | ⚡ OpenCV | 100x faster, just image preprocessing |
+| **Assignment** | ✅ Hungarian (SciPy) | Required by assignment, globally optimal |
+| **Gaussian Blur** | ⚡ OpenCV | 1000x faster, just image preprocessing (pure-math code removed) |
+| **Canny Edges** | ⚡ OpenCV | 30000x faster, just image preprocessing (pure-math code removed) |
+| **Otsu Threshold** | ⚡ OpenCV | 100x faster, just image preprocessing (pure-math code removed) |
 
 ---
 
