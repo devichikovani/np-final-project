@@ -45,7 +45,7 @@ TRANSITION_FRAMES = 300   # 5 seconds at 60fps
 HOLD_FRAMES = 80          # ~1.3 seconds at 60fps
 
 # 3D Mode Settings
-ENABLE_3D = False         # Disabled - running in 2D mode
+ENABLE_3D = True          # Enable 3D positioning (z-axis)
 Z_LAYER_SPREAD = 0.3      # How much to spread drones in Z (0.0 = flat, 1.0 = full Z_RANGE)
 
 # Velocity Matching Settings for Dynamic Tracking (Phase 3)
