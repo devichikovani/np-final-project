@@ -27,8 +27,37 @@ DT = 0.05         # Time step for integration
 W, H = 800, 600   # Canvas size
 
 # Animation settings
-TRANSITION_FRAMES = 90
-HOLD_FRAMES = 20
+TRANSITION_FRAMES = 150   # More frames for drones to reach destination
+HOLD_FRAMES = 40          # Longer pause at completed shape
+
+# =============================================================================
+# USER CONFIGURATION - EDIT THESE PATHS TO USE YOUR OWN FILES
+# =============================================================================
+
+# Number of drones (more = better detail, but slower)
+NUM_DRONES = 1200
+
+# Input/Output folders
+DATA_FOLDER = "data"      # Folder containing input images/videos
+OUTPUT_FOLDER = "output"  # Folder for output videos
+
+# Phase 1: Static image of handwritten name (PNG, JPG, or any image)
+# Set to None to use text fallback
+PHASE1_IMAGE = "handwritten_name.png"  # or None for text
+PHASE1_TEXT_FALLBACK = "STUDENT"       # Used if image not found
+
+# Phase 2: Static image of greeting (PNG, JPG, or any image)
+# Set to None to use text fallback
+PHASE2_IMAGE = "greeting.png"          # or None for text
+PHASE2_TEXT_FALLBACK = "Happy New Year!"  # Used if image not found
+
+# Phase 3: Animation file (GIF or MP4/AVI/MOV video)
+# Set to None to skip Phase 3
+PHASE3_ANIMATION = "tiger running GIF by Portugal. The Man.gif"  # or .mp4, .avi, .mov
+
+# Animation sampling settings
+MAX_ANIMATION_FRAMES = 25  # Maximum frames to sample from animation
+STEPS_PER_FRAME = 6        # Simulation steps between animation frames
 
 
 # =============================================================================
@@ -490,6 +519,60 @@ def load_gif(path):
     return frames
 
 
+def load_video(path):
+    """
+    Load video frames (MP4, AVI, MOV, etc.) as grayscale arrays.
+    
+    Uses OpenCV VideoCapture for video file reading.
+    Supports any format that OpenCV/FFmpeg can decode.
+    """
+    cap = cv2.VideoCapture(path)
+    frames = []
+    
+    if not cap.isOpened():
+        print(f"Warning: Could not open video file: {path}")
+        return frames
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        # Convert BGR to grayscale
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        frames.append(gray)
+    
+    cap.release()
+    print(f"  Loaded {len(frames)} frames from video")
+    return frames
+
+
+def load_animation(path):
+    """
+    Load animation from GIF or video file.
+    
+    Automatically detects format based on file extension.
+    Supported formats:
+    - GIF: .gif
+    - Video: .mp4, .avi, .mov, .mkv, .webm, .wmv
+    """
+    ext = os.path.splitext(path)[1].lower()
+    
+    if ext == '.gif':
+        print(f"  Loading GIF: {path}")
+        return load_gif(path)
+    elif ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.wmv']:
+        print(f"  Loading video: {path}")
+        return load_video(path)
+    else:
+        # Try video first, then GIF
+        print(f"  Unknown format '{ext}', trying as video...")
+        frames = load_video(path)
+        if not frames:
+            print(f"  Trying as GIF...")
+            frames = load_gif(path)
+        return frames
+
+
 class Swarm:
     """
     Drone swarm with IVP physics model and RK4 integration.
@@ -644,30 +727,72 @@ def render_video(frames, path, fps=30, label_override=None):
     print(f"Video: {path} ({len(frames)} frames)")
 
 
-def main(n=1000, data="data", output="output"):
-    """Run 3-phase drone show simulation with pure mathematical algorithms."""
+def main():
+    """
+    Run 3-phase drone show simulation with pure mathematical algorithms.
+    
+    Configuration is done via the USER CONFIGURATION section at the top of this file.
+    Edit the following variables to customize:
+    - NUM_DRONES: Number of drones in the swarm
+    - DATA_FOLDER: Input folder path
+    - OUTPUT_FOLDER: Output folder path
+    - PHASE1_IMAGE: Image for Phase 1 (or None for text)
+    - PHASE2_IMAGE: Image for Phase 2 (or None for text)
+    - PHASE3_ANIMATION: GIF or video for Phase 3 (or None to skip)
+    """
+    # Use configuration variables
+    n = NUM_DRONES
+    data = DATA_FOLDER
+    output = OUTPUT_FOLDER
+    
     os.makedirs(output, exist_ok=True)
     
     print("=" * 60)
     print("PURE MATHEMATICAL IMPLEMENTATION")
     print("Using: RK4, Spatial Hashing, Greedy Assignment, Sobel/Canny")
     print("=" * 60)
+    print(f"\nConfiguration:")
+    print(f"  Drones: {n}")
+    print(f"  Data folder: {data}")
+    print(f"  Output folder: {output}")
     
     swarm, frames = Swarm(n), []
     
     # Phase 1: Grid -> Handwritten Name
     print("\n[Phase 1] Handwritten Name")
-    hw = os.path.join(data, "handwritten_name.png")
-    t1 = extract_points(hw, n) if os.path.exists(hw) else extract_points("STUDENT", n, True)
+    if PHASE1_IMAGE:
+        hw = os.path.join(data, PHASE1_IMAGE)
+        if os.path.exists(hw):
+            print(f"  Loading image: {hw}")
+            t1 = extract_points(hw, n)
+        else:
+            print(f"  Image not found: {hw}")
+            print(f"  Using text fallback: '{PHASE1_TEXT_FALLBACK}'")
+            t1 = extract_points(PHASE1_TEXT_FALLBACK, n, True)
+    else:
+        print(f"  Using text: '{PHASE1_TEXT_FALLBACK}'")
+        t1 = extract_points(PHASE1_TEXT_FALLBACK, n, True)
+    
     phase1_frames = swarm.simulate(t1, TRANSITION_FRAMES)
     frames.extend(phase1_frames)
     p1_frames = len(frames)
     print(f"  Phase 1: {p1_frames} frames (including {HOLD_FRAMES} hold)")
     
     # Phase 2: Name -> Greeting
-    print("\n[Phase 2] Happy New Year")
-    gr = os.path.join(data, "greeting.png")
-    t2 = extract_points(gr, n) if os.path.exists(gr) else extract_points("Happy New Year!", n, True)
+    print("\n[Phase 2] Greeting")
+    if PHASE2_IMAGE:
+        gr = os.path.join(data, PHASE2_IMAGE)
+        if os.path.exists(gr):
+            print(f"  Loading image: {gr}")
+            t2 = extract_points(gr, n)
+        else:
+            print(f"  Image not found: {gr}")
+            print(f"  Using text fallback: '{PHASE2_TEXT_FALLBACK}'")
+            t2 = extract_points(PHASE2_TEXT_FALLBACK, n, True)
+    else:
+        print(f"  Using text: '{PHASE2_TEXT_FALLBACK}'")
+        t2 = extract_points(PHASE2_TEXT_FALLBACK, n, True)
+    
     phase2_frames = swarm.simulate(t2, TRANSITION_FRAMES)
     frames.extend(phase2_frames)
     p2_frames = len(frames)
@@ -675,26 +800,46 @@ def main(n=1000, data="data", output="output"):
     
     # Phase 3: Dynamic Tracking
     print("\n[Phase 3] Dynamic Tracking")
-    gif = os.path.join(data, "tiger running GIF by Portugal. The Man.gif")
-    if os.path.exists(gif):
-        gframes = load_gif(gif)
-        # Use more GIF frames for better animation
-        sample_rate = max(1, len(gframes) // 25)
-        sampled = gframes[::sample_rate]
-        phase3_frames = swarm.track([extract_points(f, n) for f in sampled], steps=6)
-        frames.extend(phase3_frames)
-        print(f"  Phase 3: {len(phase3_frames)} frames ({len(sampled)} GIF frames)")
+    if PHASE3_ANIMATION:
+        anim_path = os.path.join(data, PHASE3_ANIMATION)
+        if os.path.exists(anim_path):
+            anim_frames = load_animation(anim_path)
+            if anim_frames:
+                # Sample frames for performance
+                sample_rate = max(1, len(anim_frames) // MAX_ANIMATION_FRAMES)
+                sampled = anim_frames[::sample_rate]
+                print(f"  Using {len(sampled)} of {len(anim_frames)} frames (sample rate: 1/{sample_rate})")
+                
+                phase3_frames = swarm.track([extract_points(f, n) for f in sampled], steps=STEPS_PER_FRAME)
+                frames.extend(phase3_frames)
+                print(f"  Phase 3: {len(phase3_frames)} frames")
+            else:
+                print(f"  Warning: No frames loaded from {anim_path}")
+        else:
+            print(f"  Animation file not found: {anim_path}")
+            print(f"  Skipping Phase 3")
+    else:
+        print(f"  Phase 3 disabled (PHASE3_ANIMATION = None)")
     
     # Output individual subtask videos
-    render_video(frames[:p1_frames], os.path.join(output, "drone_show_math_phase1.mp4"), label_override="Phase 1: Initial -> Handwritten Name")
-    render_video(frames[p1_frames:p2_frames], os.path.join(output, "drone_show_math_phase2.mp4"), label_override="Phase 2: Name -> Happy New Year!")
-    render_video(frames[p2_frames:], os.path.join(output, "drone_show_math_phase3.mp4"), label_override="Phase 3: Dynamic Tracking")
+    print("\n[Rendering Videos]")
+    render_video(frames[:p1_frames], os.path.join(output, "drone_show_math_phase1.mp4"), 
+                 label_override="Phase 1: Initial -> Handwritten Name")
+    render_video(frames[p1_frames:p2_frames], os.path.join(output, "drone_show_math_phase2.mp4"), 
+                 label_override="Phase 2: Name -> Greeting")
+    if len(frames) > p2_frames:
+        render_video(frames[p2_frames:], os.path.join(output, "drone_show_math_phase3.mp4"), 
+                     label_override="Phase 3: Dynamic Tracking")
     
     # Output combined video
     render_video(frames, os.path.join(output, "drone_show_math_combined.mp4"))
     np.save(os.path.join(output, "trajectories_math.npy"), np.array(frames))
-    print(f"\nDone! {len(frames)} total frames, {n} drones, ~{len(frames)/30:.1f}s video")
+    
+    print("\n" + "=" * 60)
+    print(f"DONE! {len(frames)} total frames, {n} drones, ~{len(frames)/30:.1f}s video")
+    print(f"Output saved to: {output}/")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
-    main(1200)  # More drones for better visuals
+    main()
